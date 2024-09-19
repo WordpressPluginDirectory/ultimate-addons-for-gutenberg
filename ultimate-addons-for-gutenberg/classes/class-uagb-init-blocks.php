@@ -607,7 +607,7 @@ class UAGB_Init_Blocks {
 
 		$uagb_ajax_nonce = wp_create_nonce( 'uagb_ajax_nonce' );
 
-		$script_dep_path = UAGB_DIR . 'dist/blocks.asset.php';
+		$script_dep_path = UAGB_DIR . 'dist/blocks.min.asset.php';
 		$script_info     = file_exists( $script_dep_path )
 			? include $script_dep_path
 			: array(
@@ -629,9 +629,10 @@ class UAGB_Init_Blocks {
 		wp_enqueue_style( 'wp-codemirror' );
 
 		// Scripts.
+		$blocks_script = file_exists( UAGB_DIR . 'dist/blocks.min.js' ) ? 'blocks.min.js' : 'blocks.js';
 		wp_enqueue_script(
 			'uagb-block-editor-js', // Handle.
-			UAGB_URL . 'dist/blocks.js',
+			UAGB_URL . 'dist/' . $blocks_script,
 			$script_dep, // Dependencies, defined above.
 			$script_info['version'], // UAGB_VER.
 			true // Enqueue the script in the footer.
@@ -819,6 +820,9 @@ class UAGB_Init_Blocks {
 			'header_titlebar_status'                  => UAGB_Admin_Helper::get_admin_settings_option( 'uag_enable_header_titlebar', 'enabled' ),
 			'is_astra_based_theme'                    => $astra_theme_settings_available,
 			'astra_body_text_decoration'              => $astra_theme_body_text_decoration,
+			// creating an array of iframe names to ignore and checking against that array.
+			// Add more iframe names to ignore, this is done by using the 'spectra_exclude_crops_iframes' filter.
+			'exclude_crops_iframes'                   => apply_filters( 'spectra_exclude_crops_iframes', array( '__privateStripeMetricsController8690' ) ),
 		);
 
 		wp_localize_script(
