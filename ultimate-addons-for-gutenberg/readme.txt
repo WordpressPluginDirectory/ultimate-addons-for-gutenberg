@@ -4,8 +4,8 @@ Donate link: https://www.paypal.me/BrainstormForce
 Tags: gutenberg, blocks, gutenberg blocks, editor, block
 Requires at least: 5.6
 Requires PHP: 7.4
-Tested up to: 6.6
-Stable tag: 2.17.0
+Tested up to: 6.7
+Stable tag: 2.18.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -16,6 +16,8 @@ Power-up Gutenberg with advanced blocks for faster website creation. Build your 
 <strong>SPECTRA WEBSITE BUILDER - BEST PLUGIN TO EXTEND THE WORDPRESS BLOCK EDITOR WITH PAGE EDITING FEATURES, 30+ FREE CUSTOMIZABLE BLOCKS, COMING SOON MODE, POPUP BUILDER</strong>
 
 ★★★★★
+
+[youtube https://www.youtube.com/watch?v=-Ksf984Tcgw&list=PL1kzJGWGPrW_tpwr6g4i_wiGegpq7qibx]
 
 Most helpful links
 <ul>
@@ -161,9 +163,9 @@ We understand the need for a quality product backed by dedicated support that ca
 <strong>CONNECT WITH OUR TEAM AND COMMUNITY 🌐</strong>
 
 <ul>
-	<li><a href="https://www.facebook.com/groups/wpspectra" target="_blank" rel="">https://www.facebook.com/groups/wpspectra</a></li>
-	<li><a href="https://www.facebook.com/wpspectra" target="_blank" rel="">https://www.facebook.com/wpspectra</a></li>
-	<li><a href="https://twitter.com/wpspectra" target="_blank" rel="">https://twitter.com/wpspectra</a></li>
+	<li>Facebook Group: <a href="https://www.facebook.com/groups/wpastra" target="_blank" rel="">WordPress Web Creators by Astra</a></li>
+	<li>Facebook: <a href="https://www.facebook.com/wpspectra" target="_blank" rel="">Spectra</a></li>
+	<li>Twitter / X: <a href="https://twitter.com/wpspectra" target="_blank" rel="">Spectra</a></li>
 </ul>
 
 <strong>WANT TO CONTRIBUTE TO THE PLUGIN? 🙋</strong>
@@ -215,6 +217,26 @@ Our external packages use [Rating Star Component](https://github.com/n49/react-s
 
 == Changelog ==
 
+= 2.18.1 - Wednesday, 8th January 2025 =
+* Improvement: Global - Added responsive support for gradient background settings.
+* Fix: Image Gallery - Removed the automatic maximum limit for galleries with less than 8 images.
+* Fix: Tabs - Resolved an issue wherein the tabs in vertical layouts were only clickable on the title.
+* Fix: Global - Resolved an issue wherein the translated setting panels in some Spectra blocks would cause some Spectra Pro features in those blocks to not work as expected.
+* Fix: Global - Resolved an issue causing a php error for str_replace() for font loading.
+* Fix: Global - Resolved an issue wherein the self-hosted Google Fonts would not work as intended on the multisite's first sub-site setup.
+* Fix: Global - Resolved an issue in which some static and dynamic javascript strings were not translatable.
+* Fix: Global - Resolved an issue where migration buttons were not clickable, preventing the migration process from running as expected.
+
+= 2.18.0 - Wednesday, 11th December 2024 =
+* Improvement: Table Of Contents - Added a setting to enable collapsible list items.
+* Improvement: AI Assistant - Updated the AI Assistant to be aware of the saved page content.
+* Fix: Info Box - Resolved an issue wherein the overall alignment is not supported in RTL mode.
+* Fix: Image Gallery - Resolved an issue wherein the "Tiled" layout would not allow 2 or 3 columns.
+* Fix: Taxonomy List - Resolved an issue wherein plural forms would be incorrectly translated.
+* Fix: FSE - Corrected the query parameter in `get_block_templates()` function to properly handle template parts using the `slug__in` argument.
+* Fix: Global - Resolved an issue wherein the custom CSS would get special characters converted to unicode.
+* Fix: Global - Resolved an issue that would sometimes show a PHP warning for the font loader.
+
 = 2.17.0 - Monday, 25th November 2024 =
 * Feature: Added a free image search to the image media pickers.
 * Improvement: Instagram - Switched the Spectra Pro Instagram account linking to use business accounts.
@@ -224,14 +246,6 @@ Our external packages use [Rating Star Component](https://github.com/n49/react-s
 
 = 2.16.5 - Friday, 15th November 2024 =
 * This update addressed a security bug. Props to zer0gh0st (D.Sim) for privately reporting it to our team. Please make sure you are using the latest version on your website. 
-
-= 2.16.4 - Wednesday, 13th November 2024 =
-* Fix: Customizer - Resolved an issue wherein the Astra customizer panels would get an additional spacing when Spectra is active.
-* Fix: Buttons - Resolved an issue wherein the core buttons block could not be transformed to a Spectra buttons block.
-* Fix: Editor - Resolved an issue wherein tooltips would be spaced incorrectly in the block settings panels.
-
-= 2.16.3 - Saturday, 2nd November 2024 =
-* This update addressed a security bug. Props to zer0gh0st (D.Sim) for privately reporting it to our team. Please make sure you are using the latest version on your website.
 
 The full changelog is available [here](https://wpspectra.com/whats-new/).
 
