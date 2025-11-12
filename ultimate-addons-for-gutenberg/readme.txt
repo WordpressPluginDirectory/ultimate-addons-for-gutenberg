@@ -5,7 +5,8 @@ Tags: gutenberg, blocks, gutenberg blocks, editor, block
 Requires at least: 5.6
 Requires PHP: 7.4
 Tested up to: 6.8
-Stable tag: 2.19.15
+Stable tag: 2.19.16
+Beta tag: 3.0.0-beta.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -227,6 +228,11 @@ Our external packages use [Rating Star Component](https://github.com/n49/react-s
 
 == Changelog ==
 
+= 2.19.16 - Wednesday, 12th November 2025 =
+* Improvement: Added Dashboard section to stay updated with Beta releases.
+* Fix: Slider - Resolved an issue wherein slider background image not applying in small devices when overlay color is set
+* Fix: Global - Resolved recursive pattern insertion issue that was causing a page getting slow error due to an infinite loop.
+
 = 2.19.15 - Friday, 3rd October 2025 =
 * This update addressed a security bug. Props to Wordfence for reporting it responsibly to our team.
 Please make sure you are using the latest version on your website.
@@ -289,6 +295,9 @@ Please make sure you are using the latest version on your website.
 The full changelog is available [here](https://wpspectra.com/whats-new/).
 
 == Upgrade Notice ==
+
+= 3.0.0-beta.1 =
+This is a beta release. Please backup your website before updating. We recommend testing on a staging site first and not using this version on a live production website.
 
 = 2.18.2 =
 The Google Fonts library in Spectra has been updated in this version. Please check your font selections to replace any deprecated fonts and explore the new additions.
