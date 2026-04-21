@@ -213,16 +213,14 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 			update_post_meta( $post_id, '_uagb_previous_block_counts', $current_blocks );
 
 			// Update the edit timestamp for Active Site / Super Site KPIs.
-			// Only set timestamp if the post currently has Spectra blocks.
-			// Delete the meta if all Spectra blocks have been removed.
-			if ( $has_spectra_blocks_changed ) {
-				if ( $this->has_spectra_blocks( $current_blocks ) ) {
-					// Post still has Spectra blocks, update the timestamp.
-					update_post_meta( $post_id, '_uagb_last_spectra_edit', time() );
-				} else {
-					// All Spectra blocks were removed, delete the timestamp.
-					delete_post_meta( $post_id, '_uagb_last_spectra_edit' );
-				}
+			// Set timestamp on every save where the post has Spectra blocks,
+			// so the daily KPI reflects posts actively edited with Spectra.
+			// Delete the meta only when all Spectra blocks have been removed.
+			if ( $this->has_spectra_blocks( $current_blocks ) ) {
+				update_post_meta( $post_id, '_uagb_last_spectra_edit', time() );
+			} elseif ( $has_spectra_blocks_changed ) {
+				// All Spectra blocks were removed, clean up the timestamp.
+				delete_post_meta( $post_id, '_uagb_last_spectra_edit' );
 			}
 		}
 
@@ -491,9 +489,10 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 		 * @return void
 		 */
 		public function initialize_existing_posts() {
-			// Get all posts that don't have block counts stored yet.
-			$post_types = get_post_types( array( 'public' => true ), 'names' );
+			$post_types   = get_post_types( array( 'public' => true ), 'names' );
+			$current_time = time();
 
+			// Pass 1: Posts without _uagb_previous_block_counts (new installs / new posts).
 			$posts = get_posts(
 				array(
 					'post_type'      => $post_types,
@@ -509,8 +508,6 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 				)
 			);
 
-			$current_time = time();
-
 			foreach ( $posts as $post_id ) {
 				$post = get_post( $post_id );
 				if ( is_object( $post ) && has_blocks( $post->post_content ) ) {
@@ -518,11 +515,40 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 					$actual_post_id = is_object( $post_id ) ? $post_id->ID : (int) $post_id;
 					update_post_meta( $actual_post_id, '_uagb_previous_block_counts', $block_counts );
 
-					// Set the edit timestamp if the post has any Spectra blocks.
-					// This ensures existing posts are counted in Active Site / Super Site KPIs.
 					if ( $this->has_spectra_blocks( $block_counts ) ) {
 						update_post_meta( $actual_post_id, '_uagb_last_spectra_edit', $current_time );
 					}
+				}
+			}
+
+			// Pass 2: Posts that already have _uagb_previous_block_counts but are
+			// missing _uagb_last_spectra_edit. Handles sites upgraded from v2.19.13+
+			// where block counts were set before the edit timestamp was introduced.
+			$posts_missing_edit_meta = get_posts(
+				array(
+					'post_type'      => $post_types,
+					'post_status'    => array( 'publish', 'private', 'draft' ),
+					'posts_per_page' => -1,
+					'fields'         => 'ids',
+					'meta_query'     => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- One-time migration for edit timestamp backfill.
+						'relation' => 'AND',
+						array(
+							'key'     => '_uagb_previous_block_counts',
+							'compare' => 'EXISTS',
+						),
+						array(
+							'key'     => '_uagb_last_spectra_edit',
+							'compare' => 'NOT EXISTS',
+						),
+					),
+				)
+			);
+
+			foreach ( $posts_missing_edit_meta as $post_id ) {
+				$post_id      = is_object( $post_id ) ? $post_id->ID : $post_id;
+				$block_counts = get_post_meta( $post_id, '_uagb_previous_block_counts', true );
+				if ( is_array( $block_counts ) && $this->has_spectra_blocks( $block_counts ) ) {
+					update_post_meta( $post_id, '_uagb_last_spectra_edit', $current_time );
 				}
 			}
 		}

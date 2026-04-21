@@ -124,7 +124,6 @@ if ( ! class_exists( 'UAGB_Block_Analytics' ) ) {
 		 * @return void
 		 */
 		public function maybe_start_first_run_collection() {
-			// Check if this is a first-run (plugin just installed).
 			$status = get_option( 'uagb_block_usage_status', array() );
 
 			if ( ! is_array( $status ) ) {
@@ -132,12 +131,23 @@ if ( ! class_exists( 'UAGB_Block_Analytics' ) ) {
 			}
 
 			if ( empty( $status['first_run_check'] ) ) {
-				// Mark first run check as done.
-				$status['first_run_check'] = true;
+				// First-run: mark as done and run full initial setup.
+				$status['first_run_check']    = true;
+				$status['edit_meta_backfill'] = true;
 				update_option( 'uagb_block_usage_status', $status );
 
-				// Start initial stats collection and setup incremental tracking.
 				$this->start_initial_setup();
+				return;
+			}
+
+			// One-time migration: backfill _uagb_last_spectra_edit for sites
+			// that already had _uagb_previous_block_counts from v2.19.13+
+			// but were missing the edit timestamp introduced later.
+			if ( empty( $status['edit_meta_backfill'] ) ) {
+				$status['edit_meta_backfill'] = true;
+				update_option( 'uagb_block_usage_status', $status );
+
+				$this->incremental_tracker->initialize_existing_posts();
 			}
 		}
 

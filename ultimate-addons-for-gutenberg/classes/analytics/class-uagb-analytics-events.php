@@ -47,7 +47,7 @@ if ( ! class_exists( 'UAGB_Analytics_Events' ) ) {
 		 * @return bool Whether the event was queued.
 		 */
 		public static function track( $event_name, $event_value = '', $properties = array() ) {
-			if ( empty( $event_name ) ) {
+			if ( empty( $event_name ) || '' === trim( $event_name ) ) {
 				return false;
 			}
 
@@ -74,7 +74,7 @@ if ( ! class_exists( 'UAGB_Analytics_Events' ) ) {
 				'event_name'  => sanitize_text_field( $event_name ),
 				'event_value' => sanitize_text_field( $event_value ),
 				'properties'  => ! empty( $sanitized_properties ) ? $sanitized_properties : new \stdClass(),
-				'date'        => current_time( 'Y-m-d H:i:s' ),
+				'date'        => wp_date( 'Y-m-d H:i:s' ),
 			);
 
 			update_option( self::PENDING_OPTION, $pending, false );
@@ -98,6 +98,21 @@ if ( ! class_exists( 'UAGB_Analytics_Events' ) ) {
 				return array();
 			}
 
+			// Filter out malformed or empty events before sending.
+			$pending = array_filter(
+				$pending,
+				function ( $event ) {
+					return is_array( $event )
+						&& ! empty( $event['event_name'] )
+						&& '' !== trim( $event['event_name'] );
+				}
+			);
+
+			if ( empty( $pending ) ) {
+				delete_option( self::PENDING_OPTION );
+				return array();
+			}
+
 			$pushed = get_option( self::PUSHED_OPTION, array() );
 
 			if ( ! is_array( $pushed ) ) {
@@ -105,7 +120,7 @@ if ( ! class_exists( 'UAGB_Analytics_Events' ) ) {
 			}
 
 			foreach ( $pending as $event ) {
-				if ( ! empty( $event['event_name'] ) && ! in_array( $event['event_name'], $pushed, true ) ) {
+				if ( ! in_array( $event['event_name'], $pushed, true ) ) {
 					$pushed[] = $event['event_name'];
 				}
 			}
@@ -113,7 +128,7 @@ if ( ! class_exists( 'UAGB_Analytics_Events' ) ) {
 			update_option( self::PUSHED_OPTION, $pushed, false );
 			delete_option( self::PENDING_OPTION );
 
-			return $pending;
+			return array_values( $pending );
 		}
 
 		/**
@@ -165,6 +180,79 @@ if ( ! class_exists( 'UAGB_Analytics_Events' ) ) {
 			$pushed = array_values( array_diff( $pushed, $event_names ) );
 
 			update_option( self::PUSHED_OPTION, $pushed, false );
+		}
+
+		/**
+		 * Clear a single event from both pushed and pending queues.
+		 *
+		 * Use when an event becomes invalid because a mutually exclusive
+		 * event happened (e.g., clear `onboarding_skipped` when
+		 * `onboarding_completed` fires — the user finished, not skipped).
+		 *
+		 * @since 2.19.23
+		 * @param string $event_name Event to clear.
+		 * @return void
+		 */
+		public static function clear_event( $event_name ) {
+			if ( empty( $event_name ) || '' === trim( $event_name ) ) {
+				return;
+			}
+
+			self::flush_pushed( array( $event_name ) );
+
+			$pending = get_option( self::PENDING_OPTION, array() );
+			if ( is_array( $pending ) && ! empty( $pending ) ) {
+				$pending = array_values(
+					array_filter(
+						$pending,
+						function ( $event ) use ( $event_name ) {
+							return ! isset( $event['event_name'] ) || $event['event_name'] !== $event_name;
+						}
+					)
+				);
+				update_option( self::PENDING_OPTION, $pending, false );
+			}
+		}
+
+		/**
+		 * Refresh a state-based event with the latest cumulative data.
+		 *
+		 * Removes the event from both pushed and pending queues, then tracks it
+		 * fresh. This ensures only one entry exists per event_name so the server
+		 * always receives the latest state instead of accumulated duplicates.
+		 *
+		 * Use this for events that represent a rolling state (progress, counts,
+		 * toggles) rather than one-time milestones.
+		 *
+		 * @since 2.19.23
+		 * @param string $event_name  Event identifier.
+		 * @param string $event_value Primary value (version, mode, status).
+		 * @param array  $properties  Cumulative state as key-value pairs.
+		 * @return bool Whether the event was re-queued.
+		 */
+		public static function retrack_event( $event_name, $event_value = '', $properties = array() ) {
+			if ( empty( $event_name ) || '' === trim( $event_name ) ) {
+				return false;
+			}
+
+			// Remove from pushed dedup list.
+			self::flush_pushed( array( $event_name ) );
+
+			// Remove any prior entry from the pending queue.
+			$pending = get_option( self::PENDING_OPTION, array() );
+			if ( is_array( $pending ) && ! empty( $pending ) ) {
+				$pending = array_values(
+					array_filter(
+						$pending,
+						function ( $event ) use ( $event_name ) {
+							return ! isset( $event['event_name'] ) || $event['event_name'] !== $event_name;
+						}
+					)
+				);
+				update_option( self::PENDING_OPTION, $pending, false );
+			}
+
+			return self::track( $event_name, $event_value, $properties );
 		}
 	}
 }

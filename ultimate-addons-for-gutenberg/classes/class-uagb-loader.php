@@ -126,6 +126,9 @@ if ( ! class_exists( 'UAGB_Loader' ) ) {
 			// Initialize event tracker for milestone analytics.
 			require_once UAGB_DIR . 'classes/analytics/class-uagb-analytics-event-tracker.php';
 			UAGB_Analytics_Event_Tracker::get_instance();
+
+			// Initialize onboarding.
+			UAGB_Onboarding::get_instance();
 		}
 
 		/**
@@ -137,7 +140,7 @@ if ( ! class_exists( 'UAGB_Loader' ) ) {
 			define( 'UAGB_BASE', plugin_basename( UAGB_FILE ) );
 			define( 'UAGB_DIR', plugin_dir_path( UAGB_FILE ) );
 			define( 'UAGB_URL', plugins_url( '/', UAGB_FILE ) );
-			define( 'UAGB_VER', '2.19.22' );
+			define( 'UAGB_VER', '2.19.23' );
 			define( 'UAGB_MODULES_DIR', UAGB_DIR . 'modules/' );
 			define( 'UAGB_MODULES_URL', UAGB_URL . 'modules/' );
 			define( 'UAGB_SLUG', 'spectra' );
@@ -187,6 +190,15 @@ if ( ! class_exists( 'UAGB_Loader' ) ) {
 			require_once UAGB_DIR . 'classes/migration/class-spectra-migrate-blocks.php';
 			require_once UAGB_DIR . 'classes/migration/class-uagb-background-process.php';
 			require_once UAGB_DIR . 'classes/analytics/class-uagb-block-analytics.php';
+			require_once UAGB_DIR . 'classes/class-uagb-onboarding.php';
+			require_once UAGB_DIR . 'classes/class-uagb-learn-actions.php';
+			require_once UAGB_DIR . 'classes/class-uagb-astra-settings-auto-open.php';
+			require_once UAGB_DIR . 'admin-core/inc/admin-learn.php';
+
+			// Load One Onboarding library.
+			if ( file_exists( UAGB_DIR . 'lib/one-onboarding/loader.php' ) ) {
+				require_once UAGB_DIR . 'lib/one-onboarding/loader.php';
+			}
 
 
 			/**
@@ -216,7 +228,7 @@ if ( ! class_exists( 'UAGB_Loader' ) ) {
 			require_once UAGB_DIR . 'classes/class-uagb-admin-helper.php';
 			require_once UAGB_DIR . 'classes/class-uagb-helper.php';
 			require_once UAGB_DIR . 'blocks-config/blocks-config.php';
-			require_once UAGB_DIR . 'lib/astra-notices/class-astra-notices.php';
+			require_once UAGB_DIR . 'lib/astra-notices/class-bsf-admin-notices.php';
 			require_once UAGB_DIR . 'lib/class-uagb-zipwp-images.php';
 			require_once UAGB_DIR . 'lib/class-uagb-nps-survey.php';
 			/**
@@ -858,6 +870,33 @@ if ( ! class_exists( 'UAGB_Loader' ) ) {
 				$default_stats['plugin_data']['spectra']['kpi_records'] = $kpi_data;
 			}
 
+			// Add user segment classification (Free/Pro x Active/Dormant).
+			$has_pro   = defined( 'SPECTRA_PRO_VER' ) && function_exists( 'is_plugin_active' ) && is_plugin_active( 'spectra-pro/spectra-pro.php' );
+			$is_active = false;
+			if ( is_object( $this->block_analytics ) ) {
+				$activity  = $this->block_analytics->get_site_activity_level();
+				$is_active = ! empty( $activity['is_active_site'] );
+			}
+
+			if ( $has_pro ) {
+				$user_segment = $is_active ? 'pro_active' : 'pro_dormant';
+			} else {
+				$user_segment = $is_active ? 'free_active' : 'free_inactive';
+			}
+			$default_stats['plugin_data']['spectra']['user_segment'] = $user_segment;
+
+			// Add onboarding analytics data.
+			$onboarding_data = UAGB_Onboarding::get_onboarding_analytics_data();
+			if ( ! empty( $onboarding_data ) ) {
+				$default_stats['plugin_data']['spectra'] = array_merge_recursive(
+					$default_stats['plugin_data']['spectra'],
+					$onboarding_data
+				);
+			}
+
+			// Add learn progress analytics data.
+			self::add_learn_progress_analytics_data( $default_stats['plugin_data']['spectra'] );
+
 			// Add pending milestone events.
 			$events = UAGB_Analytics_Events::flush_pending();
 			if ( ! empty( $events ) ) {
@@ -868,6 +907,81 @@ if ( ! class_exists( 'UAGB_Loader' ) ) {
 		}
 
 		/**
+		 * Add Spectra learn progress analytics data.
+		 *
+		 * Aggregates completed chapters across all users on the site. A chapter
+		 * is counted as completed if at least one user has completed ALL its steps.
+		 *
+		 * @since 2.19.23
+		 * @param array $analytics_data Reference to the Spectra stats data.
+		 * @return void
+		 */
+		public static function add_learn_progress_analytics_data( &$analytics_data ) {
+			global $wpdb;
+
+			if ( ! class_exists( '\UagAdmin\Inc\Admin_Learn' ) ) {
+				return;
+			}
+
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.DirectDatabaseQuery.DirectQuery
+			$results = $wpdb->get_results(
+				$wpdb->prepare(
+					"SELECT user_id, meta_value FROM {$wpdb->usermeta} WHERE meta_key = %s",
+					'spectra_learn_progress'
+				),
+				ARRAY_A
+			);
+
+			if ( empty( $results ) ) {
+				return;
+			}
+
+			$chapters           = (array) \UagAdmin\Inc\Admin_Learn::get_chapters_structure();
+			$completed_chapters = array();
+
+			foreach ( $results as $row ) {
+				$progress_data = maybe_unserialize( $row['meta_value'] );
+
+				if ( ! is_array( $progress_data ) ) {
+					continue;
+				}
+
+				foreach ( $chapters as $chapter ) {
+					$chapter_id = $chapter['id'];
+
+					if ( in_array( $chapter_id, $completed_chapters, true ) ) {
+						continue;
+					}
+
+					if ( ! isset( $chapter['steps'] ) || ! is_array( $chapter['steps'] ) || empty( $chapter['steps'] ) ) {
+						continue;
+					}
+
+					if ( ! isset( $progress_data[ $chapter_id ] ) || ! is_array( $progress_data[ $chapter_id ] ) ) {
+						continue;
+					}
+
+					$all_steps_completed = true;
+					foreach ( $chapter['steps'] as $step ) {
+						$step_id = $step['id'];
+						if ( ! isset( $progress_data[ $chapter_id ][ $step_id ] ) || ! $progress_data[ $chapter_id ][ $step_id ] ) {
+							$all_steps_completed = false;
+							break;
+						}
+					}
+
+					if ( $all_steps_completed ) {
+						$completed_chapters[] = $chapter_id;
+					}
+				}
+			}
+
+			if ( ! empty( $completed_chapters ) ) {
+				$analytics_data['learn_chapters_completed'] = array_values( array_unique( $completed_chapters ) );
+			}
+		}
+
+		/**
 		 * Get KPI tracking data for the last 2 days (excluding today).
 		 *
 		 * @since 2.19.22
@@ -875,11 +989,12 @@ if ( ! class_exists( 'UAGB_Loader' ) ) {
 		 */
 		private function get_kpi_tracking_data() {
 			$kpi_data = array();
-			$today    = current_time( 'Y-m-d' );
+			$today    = wp_date( 'Y-m-d' );
 
 			for ( $i = 1; $i <= 2; $i++ ) {
 				$timestamp         = strtotime( $today . ' -' . $i . ' days' );
-				$date              = is_int( $timestamp ) ? gmdate( 'Y-m-d', $timestamp ) : gmdate( 'Y-m-d' );
+				$date              = is_int( $timestamp ) ? wp_date( 'Y-m-d', $timestamp ) : wp_date( 'Y-m-d' );
+				$date              = is_string( $date ) ? $date : gmdate( 'Y-m-d' );
 				$kpi_data[ $date ] = array(
 					'numeric_values' => array(
 						'posts_modified_with_spectra' => $this->get_daily_spectra_modified_count( $date ),
