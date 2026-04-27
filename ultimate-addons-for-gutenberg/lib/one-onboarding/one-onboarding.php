@@ -3,7 +3,7 @@
  * Plugin Name: One Onboarding
  * Description: One Onboarding is a comprehensive library designed to create seamless onboarding experiences for Brainstorm Force (BSF) products including Astra theme, Spectra plugin, and other WordPress products.
  * Author: Brainstorm Force
- * Version: 1.0.2
+ * Version: 1.0.3
  * License: GPL v2
  * Text Domain: one-onboarding
  *

@@ -43,12 +43,60 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 		}
 
 		/**
+		 * Canonical UAGB plugin basename — used as fallback when the UAGB_BASE
+		 * constant isn't defined (e.g., `deactivated_plugin` / `upgrader_process_complete`
+		 * can fire from contexts where the main plugin file hasn't executed).
+		 *
+		 * @var string
+		 * @since 2.19.25
+		 */
+		const PLUGIN_BASENAME_FALLBACK = 'ultimate-addons-for-gutenberg/ultimate-addons-for-gutenberg.php';
+
+		/**
 		 * Previous plugin version captured before update.
 		 *
 		 * @var string
 		 * @since 2.19.23
 		 */
 		private $pre_update_version = '';
+
+		/**
+		 * Allow-list of setting keys worth tracking for `settings_changed` events.
+		 *
+		 * Only the KEY is ever sent — never the value. Keys chosen for product-usage
+		 * insight; excludes migration state, reCAPTCHA secrets, OAuth-linked accounts,
+		 * and anything that could leak PII.
+		 *
+		 * @var string[]
+		 * @since 2.19.25
+		 */
+		private static $tracked_settings = array(
+			'uag_enable_gbs_extension',
+			'uag_enable_dynamic_content',
+			'uag_enable_block_condition',
+			'uag_enable_block_responsive',
+			'uag_enable_animations_extension',
+			'uag_enable_masonry_gallery',
+			'uag_enable_legacy_blocks',
+			'uag_enable_on_page_css_button',
+			'uag_enable_coming_soon_mode',
+			'uag_enable_templates_button',
+			'uag_enable_quick_action_sidebar',
+			'uag_enable_header_titlebar',
+			'uag_auto_block_recovery',
+			'uag_copy_paste',
+			'uag_dynamic_content_mode',
+			'uag_visibility_mode',
+			'uag_load_fse_font_globally',
+			'uag_load_gfonts_locally',
+			'uag_preload_local_fonts',
+			'uag_btn_inherit_from_theme',
+			'uag_container_global_padding',
+			'uag_container_global_elements_gap',
+			'uag_content_width',
+			'uag_content_width_set_by',
+			'uag_blocks_editor_spacing',
+		);
 
 		/**
 		 * Constructor.
@@ -64,11 +112,34 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 			add_action( 'save_post', array( $this, 'track_first_spectra_block_used' ), 20, 2 );
 			add_action( 'wp_ajax_ast_block_templates_importer', array( $this, 'track_first_template_imported' ), 5 );
 			add_action( 'wp_ajax_ast_block_templates_import_template_kit', array( $this, 'track_first_template_imported' ), 5 );
+			add_action( 'wp_ajax_ast_block_templates_import_block', array( $this, 'track_first_pattern_imported' ), 5 );
+			add_action( 'wp_ajax_uagb_track_design_library_opened', array( $this, 'track_design_library_opened' ) );
+			add_action( 'enqueue_block_editor_assets', array( $this, 'enqueue_design_library_open_listener' ), 20 );
 			add_action( 'uagb_update_before', array( $this, 'capture_pre_update_version' ) );
 			add_action( 'uagb_update_after', array( $this, 'track_plugin_updated' ) );
+			add_action( 'upgrader_process_complete', array( $this, 'capture_update_method' ), 10, 2 );
+
+			// Deactivation signal — helps quantify churn.
+			add_action( 'deactivated_plugin', array( $this, 'track_plugin_deactivated' ), 10, 1 );
+
+			// Immediate Pro-activation signal — bypasses the 24h state-event throttle.
+			add_action( 'activated_plugin', array( $this, 'on_plugin_activated_hook' ), 10, 1 );
+
+			// Settings-changed tracking — register per-key hooks from the allow-list.
+			foreach ( self::$tracked_settings as $setting_key ) {
+				add_action( 'update_option_' . $setting_key, array( $this, 'track_setting_changed' ), 10, 3 );
+			}
 
 			// Track cumulative learn chapter progress.
 			add_action( 'spectra_learn_progress_saved', array( $this, 'track_learn_chapter_progress' ) );
+
+			/*
+			 * `one_onboarding_state_saved_spectra` has two listeners whose ordering matters:
+			 *   priority 1  → capture_onboarding_start_time (stamps start on first save)
+			 *   priority 10 → track_onboarding_skipped      (may consume/clear the stamp on exit)
+			 * The stamp MUST exist before the skip handler reads it, so priority 1 runs first.
+			 */
+			add_action( 'one_onboarding_state_saved_spectra', array( $this, 'capture_onboarding_start_time' ), 1, 1 );
 
 			// Track onboarding exits (users who save state without completing).
 			add_action( 'one_onboarding_state_saved_spectra', array( $this, 'track_onboarding_skipped' ), 10, 2 );
@@ -97,9 +168,26 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 				'source'             => $source,
 				'days_since_install' => (string) self::get_days_since_install(),
 				'site_language'      => get_locale(),
+				'wp_version'         => get_bloginfo( 'version' ),
+				'php_version'        => self::get_php_version_short(),
+				'active_theme'       => sanitize_text_field( (string) get_template() ),
+				'is_multisite'       => is_multisite() ? 'yes' : 'no',
 			);
 
 			UAGB_Analytics_Events::track( 'plugin_activated', UAGB_VER, $properties );
+		}
+
+		/**
+		 * Short PHP version (major.minor) — avoids cardinality explosion from patch versions.
+		 *
+		 * @since 2.19.25
+		 * @return string
+		 */
+		private static function get_php_version_short() {
+			if ( defined( 'PHP_MAJOR_VERSION' ) && defined( 'PHP_MINOR_VERSION' ) ) {
+				return PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;
+			}
+			return (string) phpversion();
 		}
 
 		/**
@@ -149,10 +237,6 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 				return;
 			}
 
-			if ( UAGB_Analytics_Events::is_tracked( 'first_spectra_block_used' ) ) {
-				return;
-			}
-
 			if ( empty( $post->post_content ) ) {
 				return;
 			}
@@ -162,16 +246,47 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 				return;
 			}
 
-			$block_slug = $matches[1] . '/' . $matches[2];
+			$post_type      = (string) get_post_type( $post_id );
+			$editor_context = self::resolve_editor_context( $post_type );
+			$block_slug     = $matches[1] . '/' . $matches[2];
 
-			UAGB_Analytics_Events::track(
-				'first_spectra_block_used',
-				$block_slug,
-				array(
-					'post_type'          => get_post_type( $post_id ),
-					'days_since_install' => (string) self::get_days_since_install(),
-				)
+			$properties = array(
+				'post_type'          => $post_type,
+				'editor_context'     => $editor_context,
+				'days_since_install' => (string) self::get_days_since_install(),
 			);
+
+			if ( ! UAGB_Analytics_Events::is_tracked( 'first_spectra_block_used' ) ) {
+				UAGB_Analytics_Events::track( 'first_spectra_block_used', $block_slug, $properties );
+			}
+
+			// Separate FSE milestone — fires the first time a Spectra block is used inside a site-editor template/part.
+			if ( in_array( $editor_context, array( 'fse', 'fse_part' ), true )
+				&& ! UAGB_Analytics_Events::is_tracked( 'first_fse_block_used' ) ) {
+				UAGB_Analytics_Events::track( 'first_fse_block_used', $block_slug, $properties );
+			}
+		}
+
+		/**
+		 * Resolve editor_context from a post_type.
+		 *
+		 * @since 2.19.25
+		 * @param string $post_type WordPress post type slug.
+		 * @return string One of: fse, fse_part, widget, reusable, post_editor.
+		 */
+		private static function resolve_editor_context( $post_type ) {
+			switch ( $post_type ) {
+				case 'wp_template':
+					return 'fse';
+				case 'wp_template_part':
+					return 'fse_part';
+				case 'wp_block':
+					return 'reusable';
+				case 'wp_navigation':
+					return 'navigation';
+				default:
+					return 'post_editor';
+			}
 		}
 
 		/**
@@ -195,11 +310,163 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 		 * @return void
 		 */
 		public function track_plugin_updated() {
-			UAGB_Analytics_Events::retrack_event(
-				'plugin_updated',
-				UAGB_VER,
-				array( 'from_version' => $this->pre_update_version )
+			$properties = array(
+				'from_version'  => $this->pre_update_version,
+				'update_method' => self::resolve_update_method(),
 			);
+
+			UAGB_Analytics_Events::retrack_event( 'plugin_updated', UAGB_VER, $properties );
+
+			// Captured hint was consumed — clean up.
+			delete_site_option( 'uagb_last_update_method' );
+		}
+
+		/**
+		 * Capture the update method from `upgrader_process_complete`.
+		 *
+		 * Fires inside the core upgrader at the moment the update runs — at this point
+		 * we can accurately tell whether it's an auto-update (wp-cron), a WP-CLI run,
+		 * or a manual update via admin UI. The hint is stashed as a site option so
+		 * `track_plugin_updated()` (which may run on a later request) can read it.
+		 *
+		 * @since 2.19.25
+		 * @param \WP_Upgrader $upgrader   WordPress upgrader instance (unused).
+		 * @param array        $hook_extra Context from WP core.
+		 * @return void
+		 */
+		public function capture_update_method( $upgrader, $hook_extra ) { // phpcs:ignore VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable
+			$type   = isset( $hook_extra['type'] ) ? (string) $hook_extra['type'] : '';
+			$action = isset( $hook_extra['action'] ) ? (string) $hook_extra['action'] : '';
+
+			if ( 'plugin' !== $type || 'update' !== $action ) {
+				return;
+			}
+
+			$plugins = array();
+			if ( ! empty( $hook_extra['plugins'] ) && is_array( $hook_extra['plugins'] ) ) {
+				$plugins = $hook_extra['plugins'];
+			} elseif ( ! empty( $hook_extra['plugin'] ) && is_string( $hook_extra['plugin'] ) ) {
+				$plugins = array( $hook_extra['plugin'] );
+			}
+
+			$target = defined( 'UAGB_BASE' ) ? UAGB_BASE : self::PLUGIN_BASENAME_FALLBACK;
+			if ( ! in_array( $target, $plugins, true ) ) {
+				return;
+			}
+
+			$method = self::detect_update_method_runtime();
+			// Persisted until `track_plugin_updated()` consumes and deletes it — site options have no TTL.
+			update_site_option( 'uagb_last_update_method', $method );
+		}
+
+		/**
+		 * Resolve the update method from captured hint + runtime context.
+		 *
+		 * Prefers the captured hint (set during upgrader_process_complete) when
+		 * available; falls back to runtime detection when the hook didn't fire
+		 * (e.g., direct plugin-zip replacement).
+		 *
+		 * @since 2.19.25
+		 * @return string One of: auto, cli, manual.
+		 */
+		private static function resolve_update_method() {
+			$hint = get_site_option( 'uagb_last_update_method', '' );
+			if ( is_string( $hint ) && '' !== $hint ) {
+				return $hint;
+			}
+			return self::detect_update_method_runtime();
+		}
+
+		/**
+		 * Runtime detection of update method from execution context.
+		 *
+		 * @since 2.19.25
+		 * @return string One of: auto, cli, manual.
+		 */
+		private static function detect_update_method_runtime() {
+			if ( wp_doing_cron() ) {
+				return 'auto';
+			}
+			if ( defined( 'WP_CLI' ) && WP_CLI ) {
+				return 'cli';
+			}
+			return 'manual';
+		}
+
+		/**
+		 * Track plugin deactivation via `deactivated_plugin` action.
+		 *
+		 * Uses retrack so every deactivation overwrites the pending entry —
+		 * only the latest deactivation timestamp is meaningful. Flushes on the
+		 * next analytics cycle; if the plugin is permanently deleted before
+		 * that cycle, the event is lost (acceptable — the vast majority of
+		 * deactivations are temporary troubleshooting).
+		 *
+		 * @since 2.19.25
+		 * @param string $plugin Basename of the deactivated plugin.
+		 * @return void
+		 */
+		public function track_plugin_deactivated( $plugin ) {
+			$target = defined( 'UAGB_BASE' ) ? UAGB_BASE : self::PLUGIN_BASENAME_FALLBACK;
+			if ( $plugin !== $target ) {
+				return;
+			}
+
+			$properties = array(
+				'days_since_install' => (string) self::get_days_since_install(),
+				'wp_version'         => get_bloginfo( 'version' ),
+				'php_version'        => self::get_php_version_short(),
+			);
+
+			UAGB_Analytics_Events::retrack_event( 'plugin_deactivated', UAGB_VER, $properties );
+		}
+
+		/**
+		 * Track a setting change for one of the allow-listed keys.
+		 *
+		 * Only the key name is sent — never the old or new value. Values can hold
+		 * PII (domain names, custom CSS, API keys) and are out of scope for this
+		 * event. Uses retrack_event so the latest-changed key overwrites any prior
+		 * pending entry in the current analytics cycle.
+		 *
+		 * @since 2.19.25
+		 * @param mixed  $old_value  Previous value (unused — never sent).
+		 * @param mixed  $new_value  New value (unused — never sent).
+		 * @param string $option     The option key — present because WP passes it on `update_option_{$option}`.
+		 * @return void
+		 */
+		public function track_setting_changed( $old_value, $new_value, $option ) { // phpcs:ignore VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable
+			if ( ! is_string( $option ) || '' === $option ) {
+				return;
+			}
+			if ( ! in_array( $option, self::$tracked_settings, true ) ) {
+				return;
+			}
+
+			UAGB_Analytics_Events::retrack_event(
+				'settings_changed',
+				sanitize_key( $option ),
+				array(
+					'setting_key' => sanitize_key( $option ),
+				)
+			);
+		}
+
+		/**
+		 * Bypass the 24h state-event throttle for Spectra Pro activation.
+		 *
+		 * Fires the moment the Pro add-on is activated — avoids the up-to-24h
+		 * delay that comes with the polled `detect_state_events()` path.
+		 *
+		 * @since 2.19.25
+		 * @param string $plugin Basename of the activated plugin.
+		 * @return void
+		 */
+		public function on_plugin_activated_hook( $plugin ) {
+			if ( 'spectra-pro/spectra-pro.php' !== $plugin ) {
+				return;
+			}
+			$this->detect_spectra_pro_activated();
 		}
 
 		/**
@@ -287,8 +554,18 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 				return;
 			}
 
-			$gbs_fonts = get_option( 'spectra_gbs_google_fonts', array() );
+			// Primary source of truth — `spectra_global_block_styles` is the option
+			// that actually stores GBS definitions (see class-uagb-init-blocks.php:1612).
+			$gbs_stored = get_option( 'spectra_global_block_styles', array() );
+			if ( ! empty( $gbs_stored ) && is_array( $gbs_stored ) ) {
+				UAGB_Analytics_Events::track( 'gbs_first_created' );
+				return;
+			}
 
+			// Fallback — the Google-Fonts-by-GBS-id map is populated when a GBS-styled
+			// block is rendered on the frontend. Covers the case where the main option
+			// is empty but GBS usage has already been recorded via rendering.
+			$gbs_fonts = get_option( 'spectra_gbs_google_fonts', array() );
 			if ( ! empty( $gbs_fonts ) && is_array( $gbs_fonts ) ) {
 				UAGB_Analytics_Events::track( 'gbs_first_created' );
 			}
@@ -334,6 +611,68 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 		 */
 		public function track_first_template_imported() {
 			UAGB_Analytics_Events::track( 'first_template_imported' );
+		}
+
+		/**
+		 * Track first pattern (block) import via AJAX hook.
+		 *
+		 * Hooked at priority 5 on `wp_ajax_ast_block_templates_import_block` so
+		 * it runs before the main GT importer at priority 10. Dedup is handled
+		 * by `UAGB_Analytics_Events::track()`, so repeat fires are no-ops.
+		 *
+		 * @since 2.19.25
+		 * @return void
+		 */
+		public function track_first_pattern_imported() {
+			UAGB_Analytics_Events::track( 'first_pattern_imported' );
+		}
+
+		/**
+		 * Track first Design Library open via JS-side AJAX ping.
+		 *
+		 * The GT React app renders a toolbar button with id `#ast-block-templates-button`
+		 * that toggles the library modal. Clicks (manual or auto-open) on that button
+		 * fire a one-shot AJAX request to this handler. Dedup at the event layer means
+		 * any repeat fires after the first are no-ops.
+		 *
+		 * @since 2.19.25
+		 * @return void
+		 */
+		public function track_design_library_opened() {
+			if ( ! check_ajax_referer( 'uagb_ajax_nonce', 'nonce', false ) ) {
+				wp_send_json_error( 'invalid_nonce', 403 );
+			}
+
+			if ( ! current_user_can( 'edit_posts' ) ) {
+				wp_send_json_error( 'forbidden', 403 );
+			}
+
+			UAGB_Analytics_Events::track( 'first_design_library_opened' );
+			wp_send_json_success();
+		}
+
+		/**
+		 * Enqueue a tiny inline listener that pings the tracker on first
+		 * Design Library open per page load.
+		 *
+		 * Skipped once the event is already tracked — no need to ship the
+		 * listener at all, the dedup is enforced server-side too.
+		 *
+		 * @since 2.19.25
+		 * @return void
+		 */
+		public function enqueue_design_library_open_listener() {
+			if ( ! wp_script_is( 'uagb-block-editor-js', 'enqueued' ) ) {
+				return;
+			}
+
+			if ( UAGB_Analytics_Events::is_tracked( 'first_design_library_opened' ) ) {
+				return;
+			}
+
+			$inline = "(function(){var fired=false;document.addEventListener('click',function(e){if(fired)return;if(!e.target||!e.target.closest)return;var btn=e.target.closest('#ast-block-templates-button');if(!btn)return;if(typeof uagb_blocks_info==='undefined'||!uagb_blocks_info.uagb_ajax_nonce)return;fired=true;var url=(typeof ajaxurl!=='undefined')?ajaxurl:'/wp-admin/admin-ajax.php';var data=new FormData();data.append('action','uagb_track_design_library_opened');data.append('nonce',uagb_blocks_info.uagb_ajax_nonce);if(window.fetch){fetch(url,{method:'POST',credentials:'same-origin',body:data}).catch(function(){});}},true);}());";
+
+			wp_add_inline_script( 'uagb-block-editor-js', $inline );
 		}
 
 		/**
@@ -407,6 +746,25 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 		}
 
 		/**
+		 * Capture the onboarding start time on the first state save.
+		 *
+		 * The start stamp is a site-option so it survives across user sessions
+		 * and the wizard's SPA-style screen transitions. Only written once —
+		 * subsequent saves leave it alone.
+		 *
+		 * @since 2.19.25
+		 * @param array $state_data State payload (unused — only the fact-of-save matters).
+		 * @return void
+		 */
+		public function capture_onboarding_start_time( $state_data = array() ) { // phpcs:ignore VariableAnalysis.CodeAnalysis.VariableAnalysis.UnusedVariable
+			$start = absint( get_site_option( 'spectra_onboarding_start_time', 0 ) );
+			if ( $start > 0 ) {
+				return;
+			}
+			update_site_option( 'spectra_onboarding_start_time', time() );
+		}
+
+		/**
 		 * Build the property bag for onboarding_completed from completion data.
 		 *
 		 * Pure function — safe to call from both the hook handler and tests.
@@ -465,6 +823,17 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 				$properties['selected_addons'] = implode( ',', array_map( 'sanitize_text_field', $completion_data['selected_addons'] ) );
 			}
 
+			// Wall-clock duration from first state save to completion.
+			$start = absint( get_site_option( 'spectra_onboarding_start_time', 0 ) );
+			if ( $start > 0 ) {
+				$duration = time() - $start;
+				if ( $duration >= 0 && $duration <= ( 365 * DAY_IN_SECONDS ) ) {
+					$properties['duration_seconds'] = (string) $duration;
+				}
+				// One-shot — clear the stamp so reopening the wizard after completion doesn't skew future values.
+				delete_site_option( 'spectra_onboarding_start_time' );
+			}
+
 			return $properties;
 		}
 
@@ -520,6 +889,11 @@ if ( ! class_exists( 'UAGB_Analytics_Event_Tracker' ) ) {
 
 			// Retrack so the funnel reflects the user's latest exit point, not their first.
 			UAGB_Analytics_Events::retrack_event( 'onboarding_skipped', UAGB_VER, $properties );
+
+			// Clear the start-time stamp so a future re-entry starts fresh — otherwise
+			// a user who exits, returns days later, and completes would produce a
+			// misleadingly large duration_seconds.
+			delete_site_option( 'spectra_onboarding_start_time' );
 		}
 
 		/**

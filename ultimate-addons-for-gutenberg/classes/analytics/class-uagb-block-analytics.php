@@ -68,12 +68,16 @@ if ( ! class_exists( 'UAGB_Block_Analytics' ) ) {
 		 * @return void
 		 */
 		public function __construct() {
-			// Load the stats processor and incremental tracker.
+			// Load the stats processor, incremental tracker, and daily KPI counters.
 			require_once UAGB_DIR . 'classes/analytics/class-uagb-block-stats-processor.php';
 			require_once UAGB_DIR . 'classes/analytics/class-uagb-incremental-block-tracker.php';
+			require_once UAGB_DIR . 'classes/analytics/class-uagb-daily-kpi-counters.php';
 
 			$this->stats_processor     = new UAGB_Block_Stats_Processor();
 			$this->incremental_tracker = UAGB_Incremental_Block_Tracker::get_instance();
+
+			// Boot the counter singleton so its hooks register before save/transition events fire.
+			UAGB_Daily_KPI_Counters::get_instance();
 
 			// Hook into analytics option changes.
 			add_action( 'update_option_spectra_usage_optin', array( $this, 'handle_analytics_optin_change' ), 10, 3 );
@@ -132,22 +136,26 @@ if ( ! class_exists( 'UAGB_Block_Analytics' ) ) {
 
 			if ( empty( $status['first_run_check'] ) ) {
 				// First-run: mark as done and run full initial setup.
-				$status['first_run_check']    = true;
-				$status['edit_meta_backfill'] = true;
+				$status['first_run_check'] = true;
 				update_option( 'uagb_block_usage_status', $status );
 
 				$this->start_initial_setup();
 				return;
 			}
 
-			// One-time migration: backfill _uagb_last_spectra_edit for sites
-			// that already had _uagb_previous_block_counts from v2.19.13+
-			// but were missing the edit timestamp introduced later.
-			if ( empty( $status['edit_meta_backfill'] ) ) {
-				$status['edit_meta_backfill'] = true;
+			// One-time migration for sites upgrading from a version that stored
+			// the now-removed `_uagb_last_spectra_edit` meta. Seeds the sitewide
+			// page counter by re-walking posts with block counts — cheap because
+			// it reads an existing meta key instead of parsing post_content.
+			//
+			// `method_exists` is defensive — once this class is loaded the method
+			// is there. Kept as cheap insurance against a future refactor that
+			// removes the seed helper but forgets this caller.
+			if ( empty( $status['pages_counter_seeded'] ) && method_exists( $this, 'seed_pages_with_spectra_counter' ) ) {
+				$status['pages_counter_seeded'] = true;
 				update_option( 'uagb_block_usage_status', $status );
 
-				$this->incremental_tracker->initialize_existing_posts();
+				$this->seed_pages_with_spectra_counter();
 			}
 		}
 
@@ -379,42 +387,29 @@ if ( ! class_exists( 'UAGB_Block_Analytics' ) ) {
 		}
 
 		/**
-		 * Get site activity level based on Spectra block edits in the last 180 days.
+		 * Get site activity level based on pages currently containing Spectra blocks.
 		 *
-		 * Calculates KPIs for:
-		 * - Active Site: Spectra blocks manually added/edited on at least 1 page in last 180 days
-		 * - Super Site: Spectra blocks manually added/edited on at least 15 pages in last 180 days
+		 * Reads the sitewide `uagb_pages_with_spectra_count` counter maintained
+		 * incrementally by {@see UAGB_Incremental_Block_Tracker}. This is O(1)
+		 * and replaces the former 180-day postmeta scan.
+		 *
+		 * Semantics moved from "pages edited with Spectra in the last 180d" to
+		 * "pages currently containing any Spectra block." The signal is stronger
+		 * (edits are not the same as presence) and the cost is negligible.
+		 *
+		 * Key shape is preserved for payload compatibility — `active_pages_180d`
+		 * is retained as the field name but now represents the current count.
 		 *
 		 * @since 2.19.19
 		 * @return array Site activity data with classification.
 		 */
 		public function get_site_activity_level() {
-			$days_threshold = 180;
-			$cutoff_time    = time() - ( $days_threshold * DAY_IN_SECONDS );
+			if ( ! class_exists( 'UAGB_Daily_KPI_Counters' ) ) {
+				require_once UAGB_DIR . 'classes/analytics/class-uagb-daily-kpi-counters.php';
+			}
 
-			$post_types = get_post_types( array( 'public' => true ), 'names' );
+			$active_pages_count = UAGB_Daily_KPI_Counters::get_pages_with_spectra();
 
-			// Query posts where Spectra blocks have been edited in the last 180 days.
-			$posts = get_posts(
-				array(
-					'post_type'      => $post_types,
-					'post_status'    => array( 'publish', 'private', 'draft' ),
-					'posts_per_page' => -1,
-					'fields'         => 'ids',
-					'meta_query'     => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- Required for site activity KPI calculation.
-						array(
-							'key'     => '_uagb_last_spectra_edit',
-							'value'   => $cutoff_time,
-							'compare' => '>=',
-							'type'    => 'NUMERIC',
-						),
-					),
-				)
-			);
-
-			$active_pages_count = count( $posts );
-
-			// Determine site classification.
 			$site_type = 'inactive';
 			if ( $active_pages_count >= 15 ) {
 				$site_type = 'super_site';
@@ -428,6 +423,61 @@ if ( ! class_exists( 'UAGB_Block_Analytics' ) ) {
 				'is_active_site'    => $active_pages_count >= 1,
 				'is_super_site'     => $active_pages_count >= 15,
 			);
+		}
+
+		/**
+		 * Seed the `uagb_pages_with_spectra_count` counter from existing meta.
+		 *
+		 * Walks posts that already have `_uagb_previous_block_counts` — avoids
+		 * re-parsing post_content — and counts those whose payload contains at
+		 * least one Spectra block. Writes the result absolutely (overwrite)
+		 * rather than incrementing, so re-running is idempotent.
+		 *
+		 * @since 2.19.25
+		 * @return void
+		 */
+		private function seed_pages_with_spectra_counter() {
+			$post_types = get_post_types( array( 'public' => true ), 'names' );
+
+			$post_ids = get_posts(
+				array(
+					'post_type'              => $post_types,
+					'post_status'            => array( 'publish', 'private', 'draft' ),
+					'posts_per_page'         => -1,
+					'fields'                 => 'ids',
+					'no_found_rows'          => true,
+					'update_post_meta_cache' => false,
+					'update_post_term_cache' => false,
+					'meta_query'             => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- One-time seed, runs once per site lifetime.
+						array(
+							'key'     => '_uagb_previous_block_counts',
+							'compare' => 'EXISTS',
+						),
+					),
+				)
+			);
+
+			if ( empty( $post_ids ) ) {
+				update_option( UAGB_Daily_KPI_Counters::OPT_PAGES_WITH_SPECTRA, 0, false );
+				return;
+			}
+
+			$pages_with_spectra = 0;
+			foreach ( $post_ids as $post_id ) {
+				$post_id      = is_object( $post_id ) ? $post_id->ID : (int) $post_id;
+				$block_counts = get_post_meta( $post_id, '_uagb_previous_block_counts', true );
+				if ( ! is_array( $block_counts ) ) {
+					continue;
+				}
+				foreach ( $block_counts as $count ) {
+					if ( is_numeric( $count ) && (int) $count > 0 ) {
+						++$pages_with_spectra;
+						break;
+					}
+				}
+			}
+
+			update_option( UAGB_Daily_KPI_Counters::OPT_PAGES_WITH_SPECTRA, $pages_with_spectra, false );
 		}
 	}
 }

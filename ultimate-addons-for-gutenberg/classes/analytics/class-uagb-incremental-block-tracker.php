@@ -201,9 +201,6 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 			// Count current blocks in the post (what's in this post after saving).
 			$current_blocks = $this->count_blocks_in_post( $post->post_content );
 
-			// Check if Spectra blocks have changed (for site activity tracking).
-			$has_spectra_blocks_changed = $this->has_blocks_changed( $previous_blocks, $current_blocks );
-
 			// Update global stats with the correct logic:
 			// 1. Subtract the old blocks from global count (remove what this post had before)
 			// 2. Add the new blocks to global count (add what this post has now).
@@ -212,15 +209,15 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 			// Store current block counts for next comparison.
 			update_post_meta( $post_id, '_uagb_previous_block_counts', $current_blocks );
 
-			// Update the edit timestamp for Active Site / Super Site KPIs.
-			// Set timestamp on every save where the post has Spectra blocks,
-			// so the daily KPI reflects posts actively edited with Spectra.
-			// Delete the meta only when all Spectra blocks have been removed.
-			if ( $this->has_spectra_blocks( $current_blocks ) ) {
-				update_post_meta( $post_id, '_uagb_last_spectra_edit', time() );
-			} elseif ( $has_spectra_blocks_changed ) {
-				// All Spectra blocks were removed, clean up the timestamp.
-				delete_post_meta( $post_id, '_uagb_last_spectra_edit' );
+			// Maintain the O(1) sitewide pages-with-Spectra counter. The counter only
+			// moves when the post crosses the has-spectra / does-not-have-spectra
+			// boundary; steady-state saves leave it untouched. Replaces the 180-day
+			// postmeta scan formerly used for `active_pages_180d`.
+			$had_spectra = $this->has_spectra_blocks( $previous_blocks );
+			$has_spectra = $this->has_spectra_blocks( $current_blocks );
+
+			if ( $had_spectra !== $has_spectra && class_exists( 'UAGB_Daily_KPI_Counters' ) ) {
+				UAGB_Daily_KPI_Counters::adjust_pages_with_spectra( $has_spectra ? 1 : -1 );
 			}
 		}
 
@@ -265,6 +262,11 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 			// Update global stats.
 			if ( ! empty( $block_diff ) ) {
 				$this->update_global_stats( $block_diff );
+			}
+
+			// Deleting a post with Spectra blocks drops the sitewide page count by one.
+			if ( $this->has_spectra_blocks( $previous_blocks ) && class_exists( 'UAGB_Daily_KPI_Counters' ) ) {
+				UAGB_Daily_KPI_Counters::adjust_pages_with_spectra( -1 );
 			}
 		}
 
@@ -312,6 +314,11 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 
 			// Store current block counts for future comparisons.
 			update_post_meta( $post_id, '_uagb_previous_block_counts', $current_blocks );
+
+			// Restoring a Spectra-bearing post brings it back into the sitewide page count.
+			if ( $this->has_spectra_blocks( $current_blocks ) && class_exists( 'UAGB_Daily_KPI_Counters' ) ) {
+				UAGB_Daily_KPI_Counters::adjust_pages_with_spectra( 1 );
+			}
 		}
 
 		/**
@@ -365,26 +372,6 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 					$this->count_blocks_recursive( $block['innerBlocks'], $block_counts );
 				}
 			}
-		}
-
-		/**
-		 * Check if Spectra blocks have changed between previous and current counts.
-		 *
-		 * @param array $previous_blocks Block counts before saving.
-		 * @param array $current_blocks  Block counts after saving.
-		 * @since 2.19.19
-		 * @return bool True if blocks have changed, false otherwise.
-		 */
-		private function has_blocks_changed( $previous_blocks, $current_blocks ) {
-			foreach ( $this->spectra_blocks as $block_name ) {
-				$previous_count = isset( $previous_blocks[ $block_name ] ) ? $previous_blocks[ $block_name ] : 0;
-				$current_count  = isset( $current_blocks[ $block_name ] ) ? $current_blocks[ $block_name ] : 0;
-
-				if ( $previous_count !== $current_count ) {
-					return true;
-				}
-			}
-			return false;
 		}
 
 		/**
@@ -482,17 +469,16 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 
 		/**
 		 * Initialize tracking for existing posts (one-time setup).
-		 * This method populates the _uagb_previous_block_counts meta for existing posts.
-		 * Also sets _uagb_last_spectra_edit timestamp for posts that have Spectra blocks.
+		 * This method populates the _uagb_previous_block_counts meta for existing
+		 * posts and seeds the sitewide `uagb_pages_with_spectra_count` counter.
 		 *
 		 * @since 2.19.13
 		 * @return void
 		 */
 		public function initialize_existing_posts() {
-			$post_types   = get_post_types( array( 'public' => true ), 'names' );
-			$current_time = time();
+			$post_types = get_post_types( array( 'public' => true ), 'names' );
 
-			// Pass 1: Posts without _uagb_previous_block_counts (new installs / new posts).
+			// Posts without _uagb_previous_block_counts (new installs / new posts).
 			$posts = get_posts(
 				array(
 					'post_type'      => $post_types,
@@ -508,6 +494,8 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 				)
 			);
 
+			$newly_added_pages = 0;
+
 			foreach ( $posts as $post_id ) {
 				$post = get_post( $post_id );
 				if ( is_object( $post ) && has_blocks( $post->post_content ) ) {
@@ -516,40 +504,13 @@ if ( ! class_exists( 'UAGB_Incremental_Block_Tracker' ) ) {
 					update_post_meta( $actual_post_id, '_uagb_previous_block_counts', $block_counts );
 
 					if ( $this->has_spectra_blocks( $block_counts ) ) {
-						update_post_meta( $actual_post_id, '_uagb_last_spectra_edit', $current_time );
+						++$newly_added_pages;
 					}
 				}
 			}
 
-			// Pass 2: Posts that already have _uagb_previous_block_counts but are
-			// missing _uagb_last_spectra_edit. Handles sites upgraded from v2.19.13+
-			// where block counts were set before the edit timestamp was introduced.
-			$posts_missing_edit_meta = get_posts(
-				array(
-					'post_type'      => $post_types,
-					'post_status'    => array( 'publish', 'private', 'draft' ),
-					'posts_per_page' => -1,
-					'fields'         => 'ids',
-					'meta_query'     => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query -- One-time migration for edit timestamp backfill.
-						'relation' => 'AND',
-						array(
-							'key'     => '_uagb_previous_block_counts',
-							'compare' => 'EXISTS',
-						),
-						array(
-							'key'     => '_uagb_last_spectra_edit',
-							'compare' => 'NOT EXISTS',
-						),
-					),
-				)
-			);
-
-			foreach ( $posts_missing_edit_meta as $post_id ) {
-				$post_id      = is_object( $post_id ) ? $post_id->ID : $post_id;
-				$block_counts = get_post_meta( $post_id, '_uagb_previous_block_counts', true );
-				if ( is_array( $block_counts ) && $this->has_spectra_blocks( $block_counts ) ) {
-					update_post_meta( $post_id, '_uagb_last_spectra_edit', $current_time );
-				}
+			if ( $newly_added_pages > 0 && class_exists( 'UAGB_Daily_KPI_Counters' ) ) {
+				UAGB_Daily_KPI_Counters::adjust_pages_with_spectra( $newly_added_pages );
 			}
 		}
 

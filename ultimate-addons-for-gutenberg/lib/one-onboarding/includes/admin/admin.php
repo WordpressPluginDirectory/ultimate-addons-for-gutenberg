@@ -8,7 +8,7 @@
 
 namespace One_Onboarding\Admin;
 
-if ( ! class_exists( 'Admin' ) ) {
+if ( ! class_exists( '\One_Onboarding\Admin\Admin' ) ) {
 
 	/**
 	 * Admin Class
